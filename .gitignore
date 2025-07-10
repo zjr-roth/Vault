@@ -1,0 +1,8 @@
+# just ignore the usual things not to send to git
+# this is a list of files and directories that should not be tracked by git
+
+.DS_Store
+.env
+/node_modules
+/dist
+/build
