@@ -1,0 +1,1 @@
+// export vault ABI + deployed address constant.

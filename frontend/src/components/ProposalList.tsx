@@ -1,0 +1,1 @@
+// Maps proposals → Vote / Execute actions.
