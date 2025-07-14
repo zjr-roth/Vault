@@ -1,33 +1,76 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
 	useAccount,
-	useWriteContract,
-	useWaitForTransactionReceipt,
 	useDeployContract,
+	useWaitForTransactionReceipt,
+	useChainId,
 } from "wagmi";
-import { getAddress } from "viem";
+import { getAddress, isAddress } from "viem";
 import { useRouter } from "next/navigation";
 import { SYNDICATE_VAULT_ABI } from "@/utils/contractABI";
+import { SYNDICATE_VAULT_BYTECODE } from "@/utils/contractBytecode";
+
+// Base Goerli chain ID and router address
+const BASE_GOERLI_CHAIN_ID = 84531;
+const SWAP_ROUTER_ADDRESS = "0x2626664c2603336E57B271c5C0b26F421741e481";
 
 export default function CreateVault() {
 	const { address, isConnected } = useAccount();
+	const chainId = useChainId();
 	const router = useRouter();
 
-	const [members, setMembers] = useState<string[]>(["", "", ""]);
-	const [threshold, setThreshold] = useState<number>(2);
+	// Dynamic member management
+	const [members, setMembers] = useState<string[]>([""]);
+	const [threshold, setThreshold] = useState<number>(1);
 	const [isDeploying, setIsDeploying] = useState(false);
+	const [deploymentError, setDeploymentError] = useState<string>("");
 
+	// Contract deployment hooks
 	const { deployContract, data: hash, error } = useDeployContract();
-	const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt(
-		{
-			hash,
-		}
-	);
+	const {
+		isLoading: isConfirming,
+		isSuccess,
+		data: receipt,
+	} = useWaitForTransactionReceipt({
+		hash,
+	});
 
-	// Base Goerli Uniswap V3 SwapRouter
-	const SWAP_ROUTER_ADDRESS = "0x2626664c2603336E57B271c5C0b26F421741e481";
+	// Auto-add user's address as first member
+	useEffect(() => {
+		if (address && members.length === 1 && !members[0]) {
+			setMembers([address]);
+		}
+	}, [address, members]);
+
+	// Handle successful deployment
+	useEffect(() => {
+		if (isSuccess && receipt?.contractAddress) {
+			setIsDeploying(false);
+			// Navigate to the deployed vault page
+			router.push(`/vault/${receipt.contractAddress}`);
+		}
+	}, [isSuccess, receipt, router]);
+
+	const addMember = () => {
+		setMembers([...members, ""]);
+		// Auto-adjust threshold if needed
+		if (threshold > members.length + 1) {
+			setThreshold(members.length + 1);
+		}
+	};
+
+	const removeMember = (index: number) => {
+		if (members.length > 1) {
+			const newMembers = members.filter((_, i) => i !== index);
+			setMembers(newMembers);
+			// Adjust threshold if it's now too high
+			if (threshold > newMembers.length) {
+				setThreshold(newMembers.length);
+			}
+		}
+	};
 
 	const handleMemberChange = (index: number, value: string) => {
 		const newMembers = [...members];
@@ -37,10 +80,18 @@ export default function CreateVault() {
 
 	const validateForm = () => {
 		try {
+			// Filter out empty addresses
+			const filledMembers = members.filter((member) => member.trim());
+
+			if (filledMembers.length === 0) {
+				throw new Error("At least one member address is required");
+			}
+
 			// Validate all member addresses
-			const validMembers = members.map((member) => {
-				if (!member.trim())
-					throw new Error("All member addresses required");
+			const validMembers = filledMembers.map((member) => {
+				if (!isAddress(member.trim())) {
+					throw new Error(`Invalid address: ${member}`);
+				}
 				return getAddress(member.trim());
 			});
 
@@ -51,9 +102,9 @@ export default function CreateVault() {
 			}
 
 			// Validate threshold
-			if (threshold < 1 || threshold > members.length) {
+			if (threshold < 1 || threshold > validMembers.length) {
 				throw new Error(
-					"Threshold must be between 1 and number of members"
+					`Threshold must be between 1 and ${validMembers.length}`
 				);
 			}
 
@@ -65,9 +116,22 @@ export default function CreateVault() {
 
 	const handleSubmit = async (e: React.FormEvent) => {
 		e.preventDefault();
+		setDeploymentError("");
 
 		if (!isConnected) {
-			alert("Please connect your wallet");
+			setDeploymentError("Please connect your wallet");
+			return;
+		}
+
+		if (chainId !== BASE_GOERLI_CHAIN_ID) {
+			setDeploymentError("Please switch to Base Goerli network");
+			return;
+		}
+
+		if (SYNDICATE_VAULT_BYTECODE === "0x") {
+			setDeploymentError(
+				"Contract bytecode not available. Run 'npm run prepare-frontend' to compile contracts."
+			);
 			return;
 		}
 
@@ -75,11 +139,10 @@ export default function CreateVault() {
 			setIsDeploying(true);
 			const validatedMembers = validateForm();
 
-			// Deploy vault contract using useDeployContract
+			// Deploy vault contract
 			deployContract({
 				abi: SYNDICATE_VAULT_ABI,
-				bytecode:
-					"0x60a06040523480156200001157600080fd5b50604051620012393803806200123983398101604081905262000034916200035f565b600160005582516200007a5760405162461bcd60e51b815260206004820152600a6024820152694e6f206d656d6265727360b01b60448201526064015b60405180910390fd5b6000821180156200008c575082518211155b620000ce5760405162461bcd60e51b8152602060048201526011602482015270125b9d985b1a59081d1a1c995cda1bdb19607a1b604482015260640162000071565b6001600160a01b038116620001175760405162461bcd60e51b815260206004820152600e60248201526d24b73b30b634b2103937baba32b960911b604482015260640162000071565b82516200012c906001906020860190620002ab565b5060028290556001600160a01b03811660805260005b8351811015620002a15760006001600160a01b03168482815181106200016c576200016c6200044f565b60200260200101516001600160a01b031603620001bd5760405162461bcd60e51b815260206004820152600e60248201526d24b73b30b634b21036b2b6b132b960911b604482015260640162000071565b60046000858381518110620001d657620001d66200044f565b6020908102919091018101516001600160a01b031682528101919091526040016000205460ff16156200023f5760405162461bcd60e51b815260206004820152601060248201526f223ab83634b1b0ba329036b2b6b132b960811b604482015260640162000071565b6001600460008684815181106200025a576200025a6200044f565b6020908102919091018101516001600160a01b03168252810191909152604001600020805460ff191691151591909117905580620002988162000465565b91505062000142565b505050506200048d565b82805482825590600052602060002090810192821562000303579160200282015b828111156200030357825182546001600160a01b0319166001600160a01b03909116178255602090920191600190910190620002cc565b506200031192915062000315565b5090565b5b8082111562000311576000815560010162000316565b634e487b7160e01b600052604160045260246000fd5b80516001600160a01b03811681146200035a57600080fd5b919050565b6000806000606084860312156200037557600080fd5b83516001600160401b03808211156200038d57600080fd5b818601915086601f830112620003a257600080fd5b8151602082821115620003b957620003b96200032c565b8160051b604051601f19603f83011681018181108682111715620003e157620003e16200032c565b60405292835281830193508481018201928a8411156200040057600080fd5b948201945b838610156200042957620004198662000342565b8552948201949382019362000405565b809850505080880151955050505050620004466040850162000342565b90509250925092565b634e487b7160e01b600052603260045260246000fd5b6000600182016200048657634e487b7160e01b600052601160045260246000fd5b5060010190565b608051610d89620004b0600039600081816102f60152610ab70152610d896000f3fe6080604052600436106100e15760003560e01c8063a230c5241161007f578063c7f758a811610059578063c7f758a814610318578063d0e30db014610338578063da35c66414610340578063fe0d94c11461035657600080fd5b8063a230c52414610294578063a2a30949146102c4578063c31c9c07146102e457600080fd5b806342cde4e8116100bb57806342cde4e8146101f4578063438596321461020a5780635daf08ca1461023a5780639eab52531461027257600080fd5b80630121b93f14610122578063013cf08b1461014457806312065fe0146101d757600080fd5b3661011d5760405134815233907fe1fffcc4923d04b559f4d29a8bfc6cda04eb5b0d3c460751c2402c5c5cc9109c9060200160405180910390a2005b600080fd5b34801561012e57600080fd5b5061014261013d366004610b9c565b610376565b005b34801561015057600080fd5b5061019d61015f366004610b9c565b600560205260009081526040902080546001820154600283015460038401546004909401546001600160a01b03938416949390921692909160ff1685565b604080516001600160a01b0396871681529590941660208601529284019190915260608301521515608082015260a0015b60405180910390f35b3480156101e357600080fd5b50475b6040519081526020016101ce565b34801561020057600080fd5b506101e660025481565b34801561021657600080fd5b5061022a610225366004610bd1565b6104d9565b60405190151581526020016101ce565b34801561024657600080fd5b5061025a610255366004610b9c565b61052c565b6040516001600160a01b0390911681526020016101ce565b34801561027e57600080fd5b50610287610556565b6040516101ce9190610bfd565b3480156102a057600080fd5b5061022a6102af366004610c4a565b60046020526000908152604090205460ff1681565b3480156102d057600080fd5b506101e66102df366004610c6c565b6105b8565b3480156102f057600080fd5b5061025a7f000000000000000000000000000000000000000000000000000000000000000081565b34801561032457600080fd5b5061019d610333366004610b9c565b61078d565b6101426107fb565b34801561034c57600080fd5b506101e660035481565b34801561036257600080fd5b50610142610371366004610b9c565b6108b8565b3360009081526004602052604090205460ff166103ae5760405162461bcd60e51b81526004016103a590610ca8565b60405180910390fd5b60035481106103cf5760405162461bcd60e51b81526004016103a590610cce565b6000818152600560205260409020600481015460ff16156104255760405162461bcd60e51b815260206004820152601060248201526f105b1c9958591e48195e1958dd5d195960821b60448201526064016103a5565b33600090815260058201602052604090205460ff16156104775760405162461bcd60e51b815260206004820152600d60248201526c105b1c9958591e481d9bdd1959609a1b60448201526064016103a5565b3360009081526005820160205260408120805460ff19166001179055600382018054916104a383610d0e565b9091555050604051339083907f030b0f8dcd86a031eddb071f91882edeac8173663ba775713b677b42b51be44b90600090a35050565b600060035483106104fc5760405162461bcd60e51b81526004016103a590610cce565b5060008281526005602081815260408084206001600160a01b0386168552909201905290205460ff165b92915050565b6001818154811061053c57600080fd5b6000918252602090912001546001600160a01b0316905081565b606060018054806020026020016040519081016040528092919081815260200182805480156105ae57602002820191906000526020600020905b81546001600160a01b03168152600190910190602001808311610590575b5050505050905090565b3360009081526004602052604081205460ff166105e75760405162461bcd60e51b81526004016103a590610ca8565b6001600160a01b0384161580159061060757506001600160a01b03831615155b6106445760405162461bcd60e51b815260206004820152600e60248201526d496e76616c696420746f6b656e7360901b60448201526064016103a5565b600082116106895760405162461bcd60e51b81526020600482015260126024820152710416d6f756e74206d757374206265203e20360741b60448201526064016103a5565b814710156106d05760405162461bcd60e51b8152602060048201526014602482015273496e73756666696369656e742062616c616e636560601b60448201526064016103a5565b60038054600091826106e183610d0e565b90915550600081815260056020908152604080832080546001600160a01b03199081166001600160a01b038c81169182178455600184018054909316908c16908117909255600283018a9055600383019590955560048201805460ff19169055825194855292840192909252820186905291925082907f6d4365eeea2290a1fb5155f6f527bb01f4a2797dea12f20abc314effacafd2029060600160405180910390a250949350505050565b600080600080600060035486106107b65760405162461bcd60e51b81526004016103a590610cce565b5050506000928352505060056020526040902080546001820154600283015460038401546004909401546001600160a01b039384169593909216939092909160ff1690565b3360009081526004602052604090205460ff1661082a5760405162461bcd60e51b81526004016103a590610ca8565b610832610b72565b600034116108775760405162461bcd60e51b81526020600482015260126024820152710416d6f756e74206d757374206265203e20360741b60448201526064016103a5565b60405134815233907fe1fffcc4923d04b559f4d29a8bfc6cda04eb5b0d3c460751c2402c5c5cc9109c9060200160405180910390a26108b66001600055565b565b6108c0610b72565b60035481106108e15760405162461bcd60e51b81526004016103a590610cce565b6000818152600560205260409020600481015460ff16156109375760405162461bcd60e51b815260206004820152601060248201526f105b1c9958591e48195e1958dd5d195960821b60448201526064016103a5565b600254816003015410156109825760405162461bcd60e51b8152602060048201526012602482015271496e73756666696369656e7420766f74657360701b60448201526064016103a5565b80600201544710156109cd5760405162461bcd60e51b8152602060048201526014602482015273496e73756666696369656e742062616c616e636560601b60448201526064016103a5565b60048101805460ff19166001908117909155604080516101008101825283546001600160a01b039081168252928401549092166020830152610bb89082015230606082015260009060808101610a254261012c610d27565b815260028401546020808301829052600060408085018290526060948501829052805163414bf38960e01b815286516001600160a01b03908116600483015293870151841660248201529086015162ffffff16604482015293850151821660648501526080850151608485015260a085015160a485015260c085015160c485015260e0850151821660e48501529394507f0000000000000000000000000000000000000000000000000000000000000000169163414bf38991906101040160206040518083038185885af1158015610b01573d6000803e3d6000fd5b50505050506040513d601f19601f82011682018060405250810190610b269190610d3a565b9050837f6cbfbb9b98ba7bb20bf4e76a5755fce5428cbeb7fdd7cd433fd3d63062476b8082604051610b5a91815260200190565b60405180910390a2505050610b6f6001600055565b50565b600260005403610b9557604051633ee5aeb560e01b815260040160405180910390fd5b6002600055565b600060208284031215610bae57600080fd5b5035919050565b80356001600160a01b0381168114610bcc57600080fd5b919050565b60008060408385031215610be457600080fd5b82359150610bf460208401610bb5565b90509250929050565b6020808252825182820181905260009190848201906040850190845b81811015610c3e5783516001600160a01b031683529284019291840191600101610c19565b50909695505050505050565b600060208284031215610c5c57600080fd5b610c6582610bb5565b9392505050565b600080600060608486031215610c8157600080fd5b610c8a84610bb5565b9250610c9860208501610bb5565b9150604084013590509250925092565b6020808252600c908201526b2737ba10309036b2b6b132b960a11b604082015260600190565b60208082526010908201526f125b9d985b1a59081c1c9bdc1bdcd85b60821b604082015260600190565b634e487b7160e01b600052601160045260246000fd5b600060018201610d2057610d20610cf8565b5060010190565b8082018082111561052657610526610cf8565b600060208284031215610d4c57600080fd5b505191905056fea2646970667358221220a573c8dd85a30acf82ac4d09c573e16fd486d0d4c6297ad04a57693a8fece48664736f6c63430008140033" as `0x${string}`,
+				bytecode: SYNDICATE_VAULT_BYTECODE,
 				args: [
 					validatedMembers,
 					BigInt(threshold),
@@ -87,17 +150,18 @@ export default function CreateVault() {
 				],
 			});
 		} catch (err: any) {
-			alert(err.message || "Failed to deploy vault");
+			setDeploymentError(err.message || "Failed to deploy vault");
 			setIsDeploying(false);
 		}
 	};
 
-	// Handle successful deployment
-	if (isSuccess && hash) {
-		setIsDeploying(false);
-		alert(`Vault deployed successfully! Transaction: ${hash}`);
-		// TODO: Get contract address from receipt and navigate to /vault/[address]
-	}
+	// Handle deployment errors
+	useEffect(() => {
+		if (error) {
+			setIsDeploying(false);
+			setDeploymentError(error.message || "Deployment failed");
+		}
+	}, [error]);
 
 	if (!isConnected) {
 		return (
@@ -108,6 +172,21 @@ export default function CreateVault() {
 					</h1>
 					<p className="text-gray-600 mb-6">
 						Please connect your wallet to create a vault
+					</p>
+				</div>
+			</div>
+		);
+	}
+
+	if (chainId !== BASE_GOERLI_CHAIN_ID) {
+		return (
+			<div className="container mx-auto px-4 py-12">
+				<div className="max-w-md mx-auto text-center">
+					<h1 className="text-2xl font-bold text-red-600 mb-4">
+						Wrong Network
+					</h1>
+					<p className="text-gray-600 mb-6">
+						Please switch to Base Goerli network to deploy vaults
 					</p>
 				</div>
 			</div>
@@ -125,27 +204,57 @@ export default function CreateVault() {
 					onSubmit={handleSubmit}
 					className="bg-white rounded-lg shadow-md p-6"
 				>
+					{/* Member Management */}
 					<div className="mb-6">
-						<label className="block text-sm font-medium text-gray-700 mb-2">
-							Member Addresses
-						</label>
+						<div className="flex justify-between items-center mb-4">
+							<label className="block text-sm font-medium text-gray-700">
+								Member Addresses (
+								{members.filter((m) => m.trim()).length} total)
+							</label>
+							<button
+								type="button"
+								onClick={addMember}
+								className="text-blue-600 hover:text-blue-800 text-sm font-medium"
+							>
+								+ Add Member
+							</button>
+						</div>
+
 						{members.map((member, index) => (
-							<input
-								key={index}
-								type="text"
-								placeholder={`Member ${
-									index + 1
-								} address (0x...)`}
-								value={member}
-								onChange={(e) =>
-									handleMemberChange(index, e.target.value)
-								}
-								className="w-full p-3 border border-gray-300 rounded-md mb-2 font-mono text-sm"
-								required
-							/>
+							<div key={index} className="flex gap-2 mb-2">
+								<input
+									type="text"
+									placeholder={`Member ${
+										index + 1
+									} address (0x...)`}
+									value={member}
+									onChange={(e) =>
+										handleMemberChange(
+											index,
+											e.target.value
+										)
+									}
+									className="flex-1 p-3 border border-gray-300 rounded-md font-mono text-sm"
+								/>
+								{members.length > 1 && (
+									<button
+										type="button"
+										onClick={() => removeMember(index)}
+										className="px-3 py-2 text-red-600 hover:text-red-800"
+									>
+										×
+									</button>
+								)}
+							</div>
 						))}
+
+						<p className="text-xs text-gray-500 mt-2">
+							💡 For testing: Add your own address with threshold
+							= 1
+						</p>
 					</div>
 
+					{/* Threshold Selection */}
 					<div className="mb-6">
 						<label className="block text-sm font-medium text-gray-700 mb-2">
 							Voting Threshold
@@ -157,31 +266,96 @@ export default function CreateVault() {
 							}
 							className="w-full p-3 border border-gray-300 rounded-md"
 						>
-							<option value={1}>1 vote required</option>
-							<option value={2}>2 votes required</option>
-							<option value={3}>3 votes required</option>
+							{Array.from(
+								{
+									length: Math.max(
+										1,
+										members.filter((m) => m.trim()).length
+									),
+								},
+								(_, i) => i + 1
+							).map((num) => (
+								<option key={num} value={num}>
+									{num} vote{num > 1 ? "s" : ""} required
+								</option>
+							))}
 						</select>
 						<p className="text-sm text-gray-600 mt-1">
 							Number of votes needed to execute proposals
 						</p>
 					</div>
 
+					{/* Network Info */}
+					<div className="mb-6 p-3 bg-blue-50 border border-blue-200 rounded">
+						<p className="text-sm text-blue-800">
+							<strong>Network:</strong> Base Goerli Testnet
+							<br />
+							<strong>Router:</strong> Uniswap V3 (
+							{SWAP_ROUTER_ADDRESS.slice(0, 10)}...)
+						</p>
+					</div>
+
+					{/* Submit Button */}
 					<button
 						type="submit"
 						disabled={isDeploying || isConfirming}
-						className="w-full bg-blue-600 text-white py-3 px-4 rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+						className="w-full bg-blue-600 text-white py-3 px-4 rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
 					>
 						{isDeploying || isConfirming
-							? "Deploying..."
+							? isConfirming
+								? "Confirming Transaction..."
+								: "Deploying Vault..."
 							: "Deploy Vault"}
 					</button>
 
-					{error && (
+					{/* Error Display */}
+					{deploymentError && (
 						<div className="mt-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded">
-							Error: {error.message}
+							<strong>Error:</strong> {deploymentError}
+						</div>
+					)}
+
+					{/* Transaction Hash */}
+					{hash && (
+						<div className="mt-4 p-3 bg-blue-100 border border-blue-400 text-blue-700 rounded">
+							<strong>Transaction submitted!</strong>
+							<br />
+							<span className="font-mono text-xs break-all">
+								{hash}
+							</span>
+						</div>
+					)}
+
+					{/* Success Message */}
+					{isSuccess && receipt?.contractAddress && (
+						<div className="mt-4 p-3 bg-green-100 border border-green-400 text-green-700 rounded">
+							<strong>✅ Vault deployed successfully!</strong>
+							<br />
+							Redirecting to vault page...
 						</div>
 					)}
 				</form>
+
+				{/* Instructions */}
+				<div className="mt-8 bg-gray-50 rounded-lg p-6">
+					<h3 className="font-semibold text-lg mb-3">
+						Quick Start Guide
+					</h3>
+					<div className="space-y-2 text-sm text-gray-700">
+						<p>
+							<strong>Single Wallet Testing:</strong> Add just
+							your address with threshold = 1
+						</p>
+						<p>
+							<strong>Multi-Member Vault:</strong> Add 2+
+							addresses with threshold = 2+
+						</p>
+						<p>
+							<strong>After Deployment:</strong> Send ETH to
+							vault, create proposals, vote & execute
+						</p>
+					</div>
+				</div>
 			</div>
 		</div>
 	);
